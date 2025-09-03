@@ -57,4 +57,5 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
     compileOnly("de.robv.android.xposed:api:82") // Xposed API
+
 }
