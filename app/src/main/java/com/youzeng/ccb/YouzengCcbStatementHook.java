@@ -161,7 +161,16 @@ public final class YouzengCcbStatementHook {
                     XposedBridge.log("[youzeng] ccb statement needle missing " + rows[i][1]);
                     continue;
                 }
-                next = next.replace(needle, prelude(rows[i][1]) + needle);
+                // 把 prelude 插入函数体 "{" 之后，而不是属性名之前，
+                // 否则会在对象字面量两属性之间产生非法语句，整个 JS 文件解析失败。
+                int bracePos = needle.indexOf("{");
+                if (bracePos < 0) {
+                    next = next.replace(needle, prelude(rows[i][1]) + needle);
+                } else {
+                    String nBefore = needle.substring(0, bracePos + 1); // "getTransactions:function(){"
+                    String nAfter = needle.substring(bracePos + 1);     // "var n=arguments.length>0"
+                    next = next.replace(needle, nBefore + prelude(rows[i][1]) + nAfter);
+                }
                 hits++;
             }
             if (hits == 0 || next.equals(text)) {
