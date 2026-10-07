@@ -257,8 +257,16 @@ public final class YouzengCcbStatementHook {
                         || text.contains("}catch(__e){}sumbmitJD10:"));
     }
 
+    /** 进度列表页脚只绑了 Aply_MtdCd_Desc；有邮箱时用邮箱替换「电子邮件」四个字。 */
+    private static final String EMAIL_DESC_FROM = "r.Aply_MtdCd_Desc=d[r.Aply_MtdCd]||\"未知\"";
+    private static final String EMAIL_DESC_TO =
+            "r.Aply_MtdCd_Desc=r.CST_EMAIL_ADR||r.Email||d[r.Aply_MtdCd]||\"未知\"";
+
     private static boolean isHealthy(String text) {
-        return text != null && text.contains(HEALTHY) && !hasPreludeBeforeKey(text);
+        return text != null
+                && text.contains(HEALTHY)
+                && text.contains(EMAIL_DESC_TO)
+                && !hasPreludeBeforeKey(text);
     }
 
     /** 去掉所有 youzeng prelude，不论插在函数内还是属性名之前。 */
@@ -346,10 +354,22 @@ public final class YouzengCcbStatementHook {
     private static boolean patchFile(File file) {
         try {
             String text = readUtf8(file);
-            if (isHealthy(text)) {
+            String next = text;
+            if (next.contains(EMAIL_DESC_FROM)) {
+                next = next.replace(EMAIL_DESC_FROM, EMAIL_DESC_TO);
+            }
+            if (isHealthy(next)) {
+                if (!next.equals(text)) {
+                    File tmpOk = new File(file.getParentFile(), "__APP__.js.youzeng");
+                    writeUtf8(tmpOk, next);
+                    if (!tmpOk.renameTo(file)) {
+                        writeUtf8(file, next);
+                        tmpOk.delete();
+                    }
+                    XposedBridge.log("[youzeng] ccb statement email footer patched " + file.getAbsolutePath());
+                }
                 return true;
             }
-            String next = text;
             if (next.contains(MARK) || hasPreludeBeforeKey(next)) {
                 next = stripAllPreludes(next);
                 XposedBridge.log("[youzeng] ccb statement stripped preludes " + file.getAbsolutePath());
@@ -379,6 +399,9 @@ public final class YouzengCcbStatementHook {
                     next = next.replace(needle, nBefore + prelude(rows[i][1]) + nAfter);
                 }
                 hits++;
+            }
+            if (next.contains(EMAIL_DESC_FROM)) {
+                next = next.replace(EMAIL_DESC_FROM, EMAIL_DESC_TO);
             }
             if (hits == 0 || next.equals(text)) {
                 return isHealthy(next);
