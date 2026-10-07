@@ -154,6 +154,7 @@ public final class YouzengCcbStatementHook {
                     {"submitApplicationnewECD:function(){var t=arguments.length>1", "P1161W955ECD"},
                     {"submitApplicationnew:function(){var t=arguments.length>1", "P1161W955-ccvh5"},
                     {"sumbmitJD10:function(){var n=arguments;", "A0152DJ10"},
+                    {"getOrderList:function(){var t=arguments.length>0", "P1161W941"},
             };
             for (int i = 0; i < rows.length; i++) {
                 String needle = rows[i][0];
