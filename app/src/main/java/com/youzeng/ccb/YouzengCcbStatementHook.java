@@ -170,7 +170,7 @@ public final class YouzengCcbStatementHook {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 File f = fosFileArg(param.args[0]);
-                if (f != null && "__APP__.js".equals(f.getName())) {
+                if (isRuntimeAppJs(f)) {
                     FOS_FILES.put((FileOutputStream) param.thisObject, f);
                 }
             }
@@ -231,15 +231,7 @@ public final class YouzengCcbStatementHook {
             File f = children[i];
             if (f.isDirectory()) {
                 n += walk(f, depth + 1);
-            } else if ("__APP__.zip".equals(f.getName())) {
-                File js = new File(f.getParentFile(), "__APP__.js");
-                if (!js.isFile() || isBrokenFile(js)) {
-                    extractAppJs(f, js);
-                }
-                if (js.isFile() && patchFile(js)) {
-                    n++;
-                }
-            } else if ("__APP__.js".equals(f.getName())) {
+            } else if (isRuntimeAppJs(f)) {
                 if (patchFile(f)) {
                     n++;
                 }
@@ -248,17 +240,45 @@ public final class YouzengCcbStatementHook {
         return n;
     }
 
-    private static boolean isHealthy(String text) {
-        return text != null && text.contains(HEALTHY);
-    }
-
-    private static boolean isBrokenFile(File file) {
-        try {
-            String text = readUtf8(file);
-            return text.contains(MARK) && !isHealthy(text);
-        } catch (Throwable t) {
+    private static boolean isRuntimeAppJs(File f) {
+        if (f == null || !"__APP__.js".equals(f.getName())) {
             return false;
         }
+        String p = f.getAbsolutePath().replace('\\', '/');
+        return p.contains("/source/");
+    }
+
+    /** 旧版把 prelude 插在对象属性名之前，例如 }catch(__e){}getTransactions: */
+    private static boolean hasPreludeBeforeKey(String text) {
+        return text != null && (
+                text.contains("}catch(__e){}getTransactions:")
+                        || text.contains("}catch(__e){}submitApplication")
+                        || text.contains("}catch(__e){}getOrderList:")
+                        || text.contains("}catch(__e){}sumbmitJD10:"));
+    }
+
+    private static boolean isHealthy(String text) {
+        return text != null && text.contains(HEALTHY) && !hasPreludeBeforeKey(text);
+    }
+
+    /** 去掉所有 youzeng prelude，不论插在函数内还是属性名之前。 */
+    private static String stripAllPreludes(String text) {
+        String mark = "try{var __yz=FinChatJSCore.invokeHandler(\"" + EVENT + "\"";
+        String end = "}catch(__e){}";
+        String next = text;
+        int guard = 0;
+        while (guard++ < 20) {
+            int idx = next.indexOf(mark);
+            if (idx < 0) {
+                break;
+            }
+            int endPos = next.indexOf(end, idx);
+            if (endPos < 0) {
+                break;
+            }
+            next = next.substring(0, idx) + next.substring(endPos + end.length());
+        }
+        return next;
     }
 
     private static boolean extractAppJs(File zipFile, File dest) {
@@ -330,24 +350,17 @@ public final class YouzengCcbStatementHook {
                 return true;
             }
             String next = text;
-            String[][] rows = needles();
-            if (next.contains(MARK) && !isHealthy(next)) {
-                // 旧版把 prelude 插在属性名之前，先剥掉再按正确位置重打
-                for (int i = 0; i < rows.length; i++) {
-                    String p = prelude(rows[i][1]);
-                    String bad = p + rows[i][0];
-                    if (next.contains(bad)) {
-                        next = next.replace(bad, rows[i][0]);
-                    }
-                }
-                if (next.contains(MARK) && !isHealthy(next)) {
-                    File zip = new File(file.getParentFile(), "__APP__.zip");
-                    if (zip.isFile() && extractAppJs(zip, file)) {
-                        next = readUtf8(file);
-                    }
-                }
-                XposedBridge.log("[youzeng] ccb statement reverted broken patch " + file.getAbsolutePath());
+            if (next.contains(MARK) || hasPreludeBeforeKey(next)) {
+                next = stripAllPreludes(next);
+                XposedBridge.log("[youzeng] ccb statement stripped preludes " + file.getAbsolutePath());
             }
+            if (hasPreludeBeforeKey(next) || (next.contains(MARK) && !isHealthy(next))) {
+                File zip = new File(file.getParentFile(), "__APP__.zip");
+                if (zip.isFile() && extractAppJs(zip, file)) {
+                    next = readUtf8(file);
+                }
+            }
+            String[][] rows = needles();
             int hits = 0;
             for (int i = 0; i < rows.length; i++) {
                 String needle = rows[i][0];
@@ -377,7 +390,7 @@ public final class YouzengCcbStatementHook {
                 tmp.delete();
             }
             XposedBridge.log("[youzeng] ccb statement patched " + file.getAbsolutePath() + " hits=" + hits);
-            return true;
+            return isHealthy(next);
         } catch (Throwable t) {
             XposedBridge.log("[youzeng] ccb statement patch: " + t);
             return false;
