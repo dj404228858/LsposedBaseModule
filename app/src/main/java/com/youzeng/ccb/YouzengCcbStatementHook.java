@@ -8,7 +8,13 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -23,15 +29,25 @@ public final class YouzengCcbStatementHook {
 
     private static final String MARK = "youzengCcbPrint";
     private static final String EVENT = "youzengCcbPrint";
+    /** 正确注入：prelude 在 function(){ 之后。旧版打在属性名之前，小程序解析失败卡在加载页。 */
+    private static final String HEALTHY = "function(){try{var __yz=FinChatJSCore.invokeHandler(\"" + EVENT + "\"";
     private static volatile boolean bridgeHooked = false;
+    private static volatile boolean fosHooked = false;
+    private static volatile boolean watcherStarted = false;
     private static volatile boolean jsPatched = false;
+    private static volatile long lastScanMs = 0;
+    private static final Map<FileOutputStream, File> FOS_FILES =
+            Collections.synchronizedMap(new WeakHashMap<FileOutputStream, File>());
+    private static final ThreadLocal<Boolean> WRITING_PATCH = new ThreadLocal<Boolean>();
 
     private YouzengCcbStatementHook() {
     }
 
     public static void install(ClassLoader cl) {
         hookBridge(cl);
+        hookAppJsWrites();
         patchAppJs();
+        startWatcher();
     }
 
     private static void hookBridge(ClassLoader cl) {
@@ -54,6 +70,7 @@ public final class YouzengCcbStatementHook {
                         new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
+                                maybeRescan();
                                 onInvoke(param);
                             }
                         });
@@ -105,10 +122,93 @@ public final class YouzengCcbStatementHook {
         param.setResult(null);
     }
 
-    private static void patchAppJs() {
+    private static void maybeRescan() {
         if (jsPatched) {
             return;
         }
+        long now = System.currentTimeMillis();
+        if (now - lastScanMs < 1000L) {
+            return;
+        }
+        lastScanMs = now;
+        patchAppJs();
+    }
+
+    private static void startWatcher() {
+        if (watcherStarted) {
+            return;
+        }
+        watcherStarted = true;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < 90; i++) {
+                    try {
+                        Thread.sleep(2000L);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    patchAppJs();
+                    if (jsPatched && i >= 15) {
+                        XposedBridge.log("[youzeng] ccb statement watcher done patched=1");
+                        return;
+                    }
+                }
+                XposedBridge.log("[youzeng] ccb statement watcher timeout patched=" + (jsPatched ? 1 : 0));
+            }
+        }, "youzeng-ccb-js-patch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void hookAppJsWrites() {
+        if (fosHooked) {
+            return;
+        }
+        fosHooked = true;
+        XC_MethodHook remember = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                File f = fosFileArg(param.args[0]);
+                if (f != null && "__APP__.js".equals(f.getName())) {
+                    FOS_FILES.put((FileOutputStream) param.thisObject, f);
+                }
+            }
+        };
+        try {
+            XposedHelpers.findAndHookConstructor(FileOutputStream.class, File.class, remember);
+            XposedHelpers.findAndHookConstructor(FileOutputStream.class, File.class, boolean.class, remember);
+            XposedHelpers.findAndHookConstructor(FileOutputStream.class, String.class, remember);
+            XposedHelpers.findAndHookConstructor(FileOutputStream.class, String.class, boolean.class, remember);
+            XposedHelpers.findAndHookMethod(FileOutputStream.class, "close", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (Boolean.TRUE.equals(WRITING_PATCH.get())) {
+                        return;
+                    }
+                    File f = FOS_FILES.remove(param.thisObject);
+                    if (f != null) {
+                        patchFile(f);
+                    }
+                }
+            });
+            XposedBridge.log("[youzeng] ccb statement fos hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[youzeng] ccb statement fos hook: " + t);
+        }
+    }
+
+    private static File fosFileArg(Object arg) {
+        if (arg instanceof File) {
+            return (File) arg;
+        }
+        if (arg instanceof String) {
+            return new File((String) arg);
+        }
+        return null;
+    }
+
+    private static void patchAppJs() {
         File files = new File("/data/data/" + CcbConfig.TARGET_PACKAGE + "/files");
         int n = walk(new File(files, "Jump"), 0);
         n += walk(new File(files, "MiniProgram"), 0);
@@ -131,6 +231,14 @@ public final class YouzengCcbStatementHook {
             File f = children[i];
             if (f.isDirectory()) {
                 n += walk(f, depth + 1);
+            } else if ("__APP__.zip".equals(f.getName())) {
+                File js = new File(f.getParentFile(), "__APP__.js");
+                if (!js.isFile() || isBrokenFile(js)) {
+                    extractAppJs(f, js);
+                }
+                if (js.isFile() && patchFile(js)) {
+                    n++;
+                }
             } else if ("__APP__.js".equals(f.getName())) {
                 if (patchFile(f)) {
                     n++;
@@ -140,22 +248,107 @@ public final class YouzengCcbStatementHook {
         return n;
     }
 
+    private static boolean isHealthy(String text) {
+        return text != null && text.contains(HEALTHY);
+    }
+
+    private static boolean isBrokenFile(File file) {
+        try {
+            String text = readUtf8(file);
+            return text.contains(MARK) && !isHealthy(text);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static boolean extractAppJs(File zipFile, File dest) {
+        ZipFile z = null;
+        try {
+            z = new ZipFile(zipFile);
+            ZipEntry hit = null;
+            java.util.Enumeration<? extends ZipEntry> en = z.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (e.isDirectory()) {
+                    continue;
+                }
+                String name = e.getName();
+                int slash = name.lastIndexOf('/');
+                String base = slash >= 0 ? name.substring(slash + 1) : name;
+                if ("__APP__.js".equals(base)) {
+                    hit = e;
+                    break;
+                }
+            }
+            if (hit == null) {
+                return false;
+            }
+            InputStream in = z.getInputStream(hit);
+            WRITING_PATCH.set(Boolean.TRUE);
+            FileOutputStream out = new FileOutputStream(dest);
+            try {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+            } finally {
+                in.close();
+                out.close();
+                WRITING_PATCH.remove();
+            }
+            XposedBridge.log("[youzeng] ccb statement extracted " + dest.getAbsolutePath());
+            return true;
+        } catch (Throwable t) {
+            XposedBridge.log("[youzeng] ccb statement unzip: " + t);
+            return false;
+        } finally {
+            if (z != null) {
+                try {
+                    z.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private static String[][] needles() {
+        return new String[][]{
+                {"getTransactions:function(){var n=arguments.length>0", "P11048004"},
+                {"submitApplication:function(){var t=arguments.length>1", "P1161W955"},
+                {"submitApplicationnewECD:function(){var t=arguments.length>1", "P1161W955ECD"},
+                {"submitApplicationnew:function(){var t=arguments.length>1", "P1161W955-ccvh5"},
+                {"sumbmitJD10:function(){var n=arguments;", "A0152DJ10"},
+                {"getOrderList:function(){var t=arguments.length>0", "P1161W941"},
+        };
+    }
+
     private static boolean patchFile(File file) {
         try {
             String text = readUtf8(file);
-            if (text.contains(MARK)) {
+            if (isHealthy(text)) {
                 return true;
             }
             String next = text;
+            String[][] rows = needles();
+            if (next.contains(MARK) && !isHealthy(next)) {
+                // 旧版把 prelude 插在属性名之前，先剥掉再按正确位置重打
+                for (int i = 0; i < rows.length; i++) {
+                    String p = prelude(rows[i][1]);
+                    String bad = p + rows[i][0];
+                    if (next.contains(bad)) {
+                        next = next.replace(bad, rows[i][0]);
+                    }
+                }
+                if (next.contains(MARK) && !isHealthy(next)) {
+                    File zip = new File(file.getParentFile(), "__APP__.zip");
+                    if (zip.isFile() && extractAppJs(zip, file)) {
+                        next = readUtf8(file);
+                    }
+                }
+                XposedBridge.log("[youzeng] ccb statement reverted broken patch " + file.getAbsolutePath());
+            }
             int hits = 0;
-            String[][] rows = new String[][]{
-                    {"getTransactions:function(){var n=arguments.length>0", "P11048004"},
-                    {"submitApplication:function(){var t=arguments.length>1", "P1161W955"},
-                    {"submitApplicationnewECD:function(){var t=arguments.length>1", "P1161W955ECD"},
-                    {"submitApplicationnew:function(){var t=arguments.length>1", "P1161W955-ccvh5"},
-                    {"sumbmitJD10:function(){var n=arguments;", "A0152DJ10"},
-                    {"getOrderList:function(){var t=arguments.length>0", "P1161W941"},
-            };
             for (int i = 0; i < rows.length; i++) {
                 String needle = rows[i][0];
                 if (!next.contains(needle)) {
@@ -168,14 +361,14 @@ public final class YouzengCcbStatementHook {
                 if (bracePos < 0) {
                     next = next.replace(needle, prelude(rows[i][1]) + needle);
                 } else {
-                    String nBefore = needle.substring(0, bracePos + 1); // "getTransactions:function(){"
-                    String nAfter = needle.substring(bracePos + 1);     // "var n=arguments.length>0"
+                    String nBefore = needle.substring(0, bracePos + 1);
+                    String nAfter = needle.substring(bracePos + 1);
                     next = next.replace(needle, nBefore + prelude(rows[i][1]) + nAfter);
                 }
                 hits++;
             }
             if (hits == 0 || next.equals(text)) {
-                return false;
+                return isHealthy(next);
             }
             File tmp = new File(file.getParentFile(), "__APP__.js.youzeng");
             writeUtf8(tmp, next);
@@ -211,11 +404,13 @@ public final class YouzengCcbStatementHook {
     }
 
     private static void writeUtf8(File file, String text) throws Exception {
+        WRITING_PATCH.set(Boolean.TRUE);
         FileOutputStream out = new FileOutputStream(file);
         try {
             out.write(text.getBytes(StandardCharsets.UTF_8));
         } finally {
             out.close();
+            WRITING_PATCH.remove();
         }
     }
 
