@@ -261,6 +261,49 @@ public final class YouzengCcbStatementHook {
     private static final String EMAIL_DESC_FROM = "r.Aply_MtdCd_Desc=d[r.Aply_MtdCd]||\"未知\"";
     private static final String EMAIL_DESC_TO =
             "r.Aply_MtdCd_Desc=r.CST_EMAIL_ADR||r.Email||d[r.Aply_MtdCd]||\"未知\"";
+    /**
+     * 四项页 displayListMap：00 空=对方+地点，01→4 仅对方，10→3 仅地点，11→7 都隐藏。
+     * 默认 formData 就是 Inf_CgyCd=4，不要改成 3。旧补丁改过的装回来。
+     */
+    private static final String INF_DEFAULT_BAD =
+            "Inf_CgyCd:\"3\",Data_Dstz_Ind:\"\",TASK_TPCD:\"\"";
+    private static final String INF_DEFAULT_GOOD =
+            "Inf_CgyCd:\"4\",Data_Dstz_Ind:\"\",TASK_TPCD:\"\"";
+    /** 钱包分支只看对方勾选。改成和 displayListMap 同一套，并读 setData 之后的勾选。 */
+    private static final String INF_TOGGLE_FROM =
+            "d=\"\",d=!0===c[0].checked?\"4\":\"7\"";
+    private static final String INF_TOGGLE_BAD =
+            "d=(function(){var x0=0==e?!c[0].checked:!!c[0].checked,x1=c[1]?1==e?!c[1].checked:!!c[1].checked:!1;return x0&&x1?\"7\":x0?\"3\":x1?\"4\":\"\"})()";
+    private static final String INF_TOGGLE_TO =
+            "d=this.data.displayListMap[(this.data.displayList[0].checked?\"0\":\"1\")+(this.data.displayList[1]&&this.data.displayList[1].checked?\"0\":\"1\")]";
+    private static final String BITS_WALLET_FROM =
+            "c.map(function(t){2!=t.type||(o+=t.checked?\"0\":\"1\")})";
+    private static final String BITS_WALLET_TO =
+            "this.data.displayList.map(function(t){2!=t.type||(o+=t.checked?\"0\":\"1\")})";
+    private static final String BITS_ELSE_FROM =
+            "}else{c.map(function(t){1!=t.type?2!=t.type||(o+=t.checked?\"0\":\"1\"):n+=t.checked?\"0\":\"1\"})";
+    private static final String BITS_ELSE_TO =
+            "}else{this.data.displayList.map(function(t){1!=t.type?2!=t.type||(o+=t.checked?\"0\":\"1\"):n+=t.checked?\"0\":\"1\"})";
+
+    /** 勾选码与后台 PDF 开关对齐：别改默认 4，钱包分支走 displayListMap，位串读 setData 之后的列表。 */
+    private static String applyInfPatches(String next) {
+        if (next.contains(INF_DEFAULT_BAD)) {
+            next = next.replace(INF_DEFAULT_BAD, INF_DEFAULT_GOOD);
+        }
+        if (next.contains(INF_TOGGLE_BAD)) {
+            next = next.replace(INF_TOGGLE_BAD, INF_TOGGLE_TO);
+        }
+        if (next.contains(INF_TOGGLE_FROM)) {
+            next = next.replace(INF_TOGGLE_FROM, INF_TOGGLE_TO);
+        }
+        if (next.contains(BITS_WALLET_FROM)) {
+            next = next.replace(BITS_WALLET_FROM, BITS_WALLET_TO);
+        }
+        if (next.contains(BITS_ELSE_FROM)) {
+            next = next.replace(BITS_ELSE_FROM, BITS_ELSE_TO);
+        }
+        return next;
+    }
 
     private static boolean isHealthy(String text) {
         return text != null
@@ -358,6 +401,7 @@ public final class YouzengCcbStatementHook {
             if (next.contains(EMAIL_DESC_FROM)) {
                 next = next.replace(EMAIL_DESC_FROM, EMAIL_DESC_TO);
             }
+            next = applyInfPatches(next);
             if (isHealthy(next)) {
                 if (!next.equals(text)) {
                     File tmpOk = new File(file.getParentFile(), "__APP__.js.youzeng");
@@ -403,6 +447,7 @@ public final class YouzengCcbStatementHook {
             if (next.contains(EMAIL_DESC_FROM)) {
                 next = next.replace(EMAIL_DESC_FROM, EMAIL_DESC_TO);
             }
+            next = applyInfPatches(next);
             if (hits == 0 || next.equals(text)) {
                 return isHealthy(next);
             }

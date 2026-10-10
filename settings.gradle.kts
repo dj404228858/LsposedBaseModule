@@ -20,6 +20,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "XingHuiLsposedModule"
+rootProject.name = "Youzeng"
 include(":app")
  

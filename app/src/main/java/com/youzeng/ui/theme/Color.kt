@@ -1,4 +1,4 @@
-package com.example.xinghuilsposedmodule.ui.theme
+package com.youzeng.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

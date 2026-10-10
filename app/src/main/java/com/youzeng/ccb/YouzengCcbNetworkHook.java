@@ -30,6 +30,7 @@ public final class YouzengCcbNetworkHook {
     private static volatile boolean gmDecryptHookInstalled = false;
     private static volatile boolean httpShortCircuitInstalled = false;
     private static volatile boolean mbsMenuSkipInstalled = false;
+    private static volatile boolean ebsH5HookInstalled = false;
 
     private static final ThreadLocal<Boolean> LOCAL_MOCK = new ThreadLocal<>();
     private static final ThreadLocal<FwdCtx> FWD = new ThreadLocal<>();
@@ -100,6 +101,7 @@ public final class YouzengCcbNetworkHook {
             hookLegacyParseResult(cl);
             hookTxParseResult(cl);
             hookGmDecrypt(cl);
+            hookEbsH5Parse(cl);
             hookHttpShortCircuit(cl);
             YouzengCcbStatementHook.install(cl);
             // 尽早安装财富 hook（不依赖 MainActivity）
@@ -348,11 +350,128 @@ public final class YouzengCcbNetworkHook {
             } catch (Throwable t) {
                 log("[-] ccb WL.smEnvelop hook skip: " + t);
             }
+            try {
+                XposedHelpers.findAndHookMethod(
+                        wl,
+                        "fullDecryptResponse",
+                        String.class,
+                        boolean.class,
+                        String.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object res = param.getResult();
+                                if (!(res instanceof String)) {
+                                    return;
+                                }
+                                forwardDetailPlain((String) res, null);
+                            }
+                        });
+                log("[+] ccb WhiteListUtils.fullDecryptResponse hooked");
+            } catch (Throwable t) {
+                log("[-] ccb WL.fullDecryptResponse hook skip: " + t);
+            }
             gmDecryptHookInstalled = true;
             log("[+] ccb WhiteListUtils.decrypt hooked");
         } catch (Throwable t) {
             log("[-] ccb gm decrypt hook skip: " + t);
         }
+    }
+
+    private static void hookEbsH5Parse(ClassLoader cl) {
+        if (ebsH5HookInstalled) {
+            return;
+        }
+        String[] names = new String[]{
+                "com.ccb.framework.tx.new_protocol.EbsH5Response",
+                "com.ccb.framework.ui.widget.webview.plugin.EbsH5Response",
+                "com.ccb.framework.tx.new_protocol.MbsH5Response",
+                "com.ccb.framework.ui.widget.webview.plugin.MbsH5Response"
+        };
+        int hooked = 0;
+        for (int i = 0; i < names.length; i++) {
+            try {
+                Class<?> cls = XposedHelpers.findClass(names[i], cl);
+                XposedHelpers.findAndHookMethod(cls, "parseResult", String.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Object thiz = param.thisObject;
+                        String content = fieldString(thiz, "content");
+                        Object request = null;
+                        try {
+                            request = XposedHelpers.getObjectField(thiz, "mRequest");
+                        } catch (Throwable ignored) {
+                        }
+                        JSONObject fw = forwardDetailPlain(content, request);
+                        if (fw == null || !"replace".equals(fw.optString("action", ""))) {
+                            return;
+                        }
+                        String body = fw.optString("body", "");
+                        if (body.isEmpty()) {
+                            return;
+                        }
+                        try {
+                            XposedHelpers.setObjectField(thiz, "content", body);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
+                hooked++;
+                log("[+] ccb H5 parseResult hooked " + names[i]);
+            } catch (Throwable t) {
+                log("[-] ccb H5 parseResult skip " + names[i] + ": " + t);
+            }
+        }
+        ebsH5HookInstalled = hooked > 0;
+    }
+
+    private static JSONObject forwardDetailPlain(String data, Object request) {
+        if (isTrivialPlain(data) || shouldSkip(data)) {
+            return null;
+        }
+        if (data.indexOf("Prim_Acc_Acg_Dtl") < 0
+                && data.indexOf("SJ3703") < 0
+                && data.indexOf("SJ3713") < 0) {
+            FwdCtx ctx = FWD.get();
+            String tx = ctx != null ? ctx.txcode : "";
+            if (request != null) {
+                String fromReq = callString(request, "getTxCode");
+                if (fromReq != null && !fromReq.isEmpty()) {
+                    tx = fromReq;
+                }
+            }
+            tx = tx == null ? "" : tx.toUpperCase();
+            if (!"SJ3703".equals(tx) && !"SJ3713".equals(tx)) {
+                return null;
+            }
+        }
+        FwdCtx ctx = FWD.get();
+        String txcode = ctx != null ? ctx.txcode : "";
+        String url = ctx != null ? ctx.url : "";
+        String reqPlain = ctx != null ? ctx.reqPlain : "";
+        if (request != null) {
+            String fromReq = callString(request, "getTxCode");
+            if (fromReq != null && !fromReq.isEmpty()) {
+                txcode = fromReq;
+            }
+            String fromUrl = callString(request, "getUrl");
+            if (fromUrl != null && !fromUrl.isEmpty()) {
+                url = fromUrl;
+            }
+            String fromJson = requestToJson(request);
+            if (fromJson != null && fromJson.length() > 2) {
+                reqPlain = fromJson;
+            }
+        }
+        if ((txcode == null || txcode.isEmpty()) && data.indexOf("TXCODE") >= 0) {
+            txcode = txcodeFromJson(data);
+        }
+        JSONObject fw = YouzengForwardClient.forward("ccb", url, txcode, reqPlain, data, txcode);
+        if (fw != null) {
+            log("[FORWARD] ccb h5/detail action=" + fw.optString("action", "") + " tx=" + txcode
+                    + " bodyLen=" + data.length());
+        }
+        return fw;
     }
 
     private static void rewriteGmPlain(XC_MethodHook.MethodHookParam param) {
@@ -404,6 +523,14 @@ public final class YouzengCcbNetworkHook {
             return;
         }
         String content = param.args[0] != null ? String.valueOf(param.args[0]) : "";
+        if (isTrivialPlain(content)) {
+            String fromStream = copyInputStreamArg(param);
+            if (!isTrivialPlain(fromStream)) {
+                content = fromStream;
+            } else {
+                return;
+            }
+        }
         if (shouldSkip(content)) {
             return;
         }
@@ -432,7 +559,7 @@ public final class YouzengCcbNetworkHook {
         Object response = param.args[1];
         String txcode = callString(request, "getTxCode");
         String content = callString(response, "getStrContent");
-        if (shouldSkip(content)) {
+        if (isTrivialPlain(content) || shouldSkip(content)) {
             return;
         }
         String url = callString(request, "getUrl");
@@ -505,6 +632,34 @@ public final class YouzengCcbNetworkHook {
             }
         } catch (Throwable t) {
             log("[-] ccb setString: " + t);
+        }
+    }
+
+    private static boolean isTrivialPlain(String content) {
+        if (content == null) {
+            return true;
+        }
+        String t = content.trim();
+        return t.isEmpty() || "{}".equals(t) || "null".equalsIgnoreCase(t);
+    }
+
+    private static String copyInputStreamArg(XC_MethodHook.MethodHookParam param) {
+        if (param.args == null || param.args.length < 2 || !(param.args[1] instanceof java.io.InputStream)) {
+            return "";
+        }
+        try {
+            java.io.InputStream in = (java.io.InputStream) param.args[1];
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            byte[] data = bos.toByteArray();
+            param.args[1] = new java.io.ByteArrayInputStream(data);
+            return new String(data, "UTF-8");
+        } catch (Throwable t) {
+            return "";
         }
     }
 

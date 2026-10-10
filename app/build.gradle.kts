@@ -5,17 +5,32 @@ plugins {
 }
 
 android {
-    namespace = "com.example.xinghuilsposedmodule"
+    namespace = "com.youzeng"
     compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "com.example.xinghuilsposedmodule"
+        applicationId = "com.youzeng"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+                abiFilters += "arm64-v8a"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
 
     buildTypes {

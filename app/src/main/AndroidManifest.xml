@@ -2,7 +2,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <permission
+        android:name="com.youzeng.permission.UPDATE_DID"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.youzeng.permission.UPDATE_DID" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <queries>
+        <package android:name="com.yitong.mbank.psbc" />
+        <package android:name="com.yitong.mbankpsbc" />
+        <package android:name="com.chinamworld.main" />
+    </queries>
+
     <application
+        android:name=".YouzengApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -10,28 +23,65 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.XingHuiLsposedModule">
+        android:theme="@style/Theme.Youzeng">
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.XingHuiLsposedModule">
+            android:theme="@style/Theme.Youzeng">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Xposed模块元数据 -->
+
+        <!-- 供目标 App 进程跨 UID 读取模块配置（与 XposedModule 的 ConfigProvider 同思路） -->
+        <provider
+            android:name=".YouzengConfigProvider"
+            android:authorities="com.youzeng.configprovider"
+            android:exported="true"
+            android:directBootAware="true"
+            android:grantUriPermissions="true"
+            tools:ignore="ExportedContentProvider" />
+
+        <!-- Xposed/LSPosed 模块元数据：缺 xposedmodule 时重装后可能不再注入 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
         <meta-data
             android:name="rootless"
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="xinghui" />
+            android:value="uu168" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
+        <!-- 让模块 SharedPreferences 落到 LSPosed 可读路径，目标进程才能用 XSharedPreferences 读到 did -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+        <!-- 推荐作用域：LSPosed 管理器启用模块时默认勾选；数组见 res/values/arrays.xml -->
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
+        <receiver
+            android:name=".LsposedScopeReceiver"
+            android:directBootAware="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
